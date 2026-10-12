@@ -1,7 +1,0 @@
-{
-  "functions": {
-    "api/download.py": {
-      "maxDuration": 60
-    }
-  }
-}
