@@ -12,8 +12,11 @@ servidor); el navegador del usuario descarga el video directo desde el CDN.
 """
 
 import json
+import os
+import re
+import tempfile
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
 import yt_dlp
 
@@ -91,8 +94,8 @@ PAGINA = """<!DOCTYPE html>
         resultado.innerHTML =
           (data.miniatura ? '<img src="' + data.miniatura + '" alt="miniatura" />' : "") +
           '<div class="titulo">' + (data.titulo || "") + '</div>' +
-          '<a class="descargar" href="' + data.url_directa + '" download target="_blank" rel="noopener">Descargar MP4</a>' +
-          '<div class="nota">Si el video se abre en vez de bajar, clic derecho sobre el y elige "Guardar video".</div>';
+          '<a class="descargar" href="/api/download?dl=1&url=' + encodeURIComponent(url) + '">Descargar MP4</a>' +
+          '<div class="nota">La descarga pasa por el servidor para evitar el bloqueo de TikTok/Facebook.</div>';
       } catch (e) {
         estado.className = "error"; estado.textContent = "\\u26A0\\uFE0F " + e.message;
       } finally { btn.disabled = false; }
@@ -119,6 +122,7 @@ def extraer_video(url: str) -> dict:
         info = info["entries"][0]
 
     url_directa = info.get("url")
+    headers = info.get("http_headers") or {}
     if not url_directa:
         candidatos = [
             f for f in info.get("formats", [])
@@ -128,6 +132,7 @@ def extraer_video(url: str) -> dict:
         ]
         if candidatos:
             url_directa = candidatos[-1]["url"]
+            headers = candidatos[-1].get("http_headers") or headers
 
     if not url_directa:
         raise ValueError("No se pudo encontrar el video en ese link.")
@@ -136,7 +141,15 @@ def extraer_video(url: str) -> dict:
         "titulo": info.get("title") or "video",
         "miniatura": info.get("thumbnail"),
         "url_directa": url_directa,
+        "headers": headers,
     }
+
+
+def nombre_archivo(titulo: str) -> str:
+    """Convierte un titulo en un nombre de archivo .mp4 seguro."""
+    limpio = re.sub(r"[^\w\s-]", "", titulo, flags=re.UNICODE).strip()
+    limpio = re.sub(r"\s+", "_", limpio)
+    return (limpio[:60] or "video") + ".mp4"
 
 
 class handler(BaseHTTPRequestHandler):
@@ -153,16 +166,72 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(PAGINA.encode("utf-8"))
 
+    def _proxy_descarga(self, url: str):
+        """yt-dlp baja el video a /tmp (maneja cookies/sesion y evita el 403 de
+        la CDN) y luego lo reenviamos al navegador como un archivo .mp4."""
+        carpeta = tempfile.mkdtemp()
+        plantilla = os.path.join(carpeta, "video.%(ext)s")
+        opciones = {
+            "quiet": True,
+            "no_warnings": True,
+            "format": "best[ext=mp4]/best",
+            "outtmpl": plantilla,
+            "noplaylist": True,
+        }
+        try:
+            with yt_dlp.YoutubeDL(opciones) as ydl:
+                info = ydl.extract_info(url, download=True)
+            if info.get("_type") == "playlist" and info.get("entries"):
+                info = info["entries"][0]
+
+            archivos = [f for f in os.listdir(carpeta) if f.startswith("video.")]
+            if not archivos:
+                raise RuntimeError("No se genero el archivo de video.")
+            ruta = os.path.join(carpeta, archivos[0])
+
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            nombre = nombre_archivo(info.get("title") or "video")
+            self.send_header(
+                "Content-Disposition",
+                "attachment; filename*=UTF-8''" + quote(nombre),
+            )
+            self.send_header("Content-Length", str(os.path.getsize(ruta)))
+            self.end_headers()
+            with open(ruta, "rb") as f:
+                while True:
+                    trozo = f.read(64 * 1024)
+                    if not trozo:
+                        break
+                    self.wfile.write(trozo)
+        finally:
+            # Limpieza del temporal.
+            try:
+                for f in os.listdir(carpeta):
+                    os.remove(os.path.join(carpeta, f))
+                os.rmdir(carpeta)
+            except OSError:
+                pass
+
     def do_GET(self):
         params = parse_qs(urlparse(self.path).query)
         url = (params.get("url") or [""])[0].strip()
+        descargar = (params.get("dl") or [""])[0] == "1"
 
         # Sin ?url= -> mostramos la pagina.
         if not url:
             self._enviar_pagina()
             return
 
-        # Con ?url= -> procesamos el video.
+        # Con ?dl=1 -> proxy: bajamos el video y se lo pasamos al navegador.
+        if descargar:
+            try:
+                self._proxy_descarga(url)
+            except Exception:  # noqa: BLE001
+                self._enviar_json(500, {"error": "No se pudo descargar el video."})
+            return
+
+        # Con ?url= (sin dl) -> devolvemos la info en JSON.
         try:
             self._enviar_json(200, extraer_video(url))
         except Exception as e:  # noqa: BLE001
