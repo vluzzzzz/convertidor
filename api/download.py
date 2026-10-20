@@ -37,14 +37,36 @@ def ruta_ffmpeg():
 EXTRACTOR_ARGS = {"youtube": {"player_client": ["tv", "ios", "android", "web"]}}
 
 
+def archivo_cookies():
+    """Si existe la variable de entorno YT_COOKIES (formato Netscape), la escribe
+    a /tmp y devuelve la ruta. Asi yt-dlp usa una sesion valida y YouTube no
+    bloquea. La variable se configura en Vercel (Settings > Environment
+    Variables), NUNCA en el repositorio.
+    """
+    contenido = os.environ.get("YT_COOKIES")
+    if not contenido:
+        return None
+    ruta = os.path.join(tempfile.gettempdir(), "cookies.txt")
+    try:
+        with open(ruta, "w", encoding="utf-8") as f:
+            f.write(contenido)
+        return ruta
+    except OSError:
+        return None
+
+
 def opciones_base() -> dict:
     """Opciones comunes de yt-dlp, con los ajustes anti-bloqueo de YouTube."""
-    return {
+    opciones = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "extractor_args": EXTRACTOR_ARGS,
     }
+    cookies = archivo_cookies()
+    if cookies:
+        opciones["cookiefile"] = cookies
+    return opciones
 
 
 # ---------------------------------------------------------------------------
