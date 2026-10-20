@@ -1,7 +1,17 @@
-# Convertidor de video (TikTok / Facebook → MP4)
+# Convertidor de video (TikTok / Facebook → MP4 / MP3)
 
-Un descargador de videos **simple y sin anuncios**. Pegas el link, le das a
-**Descargar** y bajas el MP4. Pensado para que cualquiera lo use.
+Un descargador **simple y sin anuncios**. Pegas el link, eliges Video (MP4) o
+Audio (MP3), le das a **Descargar** y listo. Pensado para que cualquiera lo use.
+
+## ¿Y YouTube?
+
+YouTube bloquea las descargas desde servidores (como Vercel) con sistemas
+anti-bot cada vez más duros, así que **no es confiable** desde la web. Para
+YouTube en el celular, usa una app que descarga directo en el teléfono:
+
+- **Android:** [NewPipe](https://newpipe.net) — gratis, sin anuncios, baja
+  música de YouTube a MP3/M4A directo en el celular. No depende de ningún
+  servidor, por eso nunca lo bloquean.
 
 ## ¿Cómo funciona?
 

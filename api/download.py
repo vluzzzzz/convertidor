@@ -32,41 +32,13 @@ def ruta_ffmpeg():
         return None
 
 
-# YouTube bloquea las IP de datacenter (Vercel) con su cliente web normal.
-# Pedir los clientes de TV / celular suele esquivar ese bloqueo sin cookies.
-EXTRACTOR_ARGS = {"youtube": {"player_client": ["tv", "ios", "android", "web"]}}
-
-
-def archivo_cookies():
-    """Si existe la variable de entorno YT_COOKIES (formato Netscape), la escribe
-    a /tmp y devuelve la ruta. Asi yt-dlp usa una sesion valida y YouTube no
-    bloquea. La variable se configura en Vercel (Settings > Environment
-    Variables), NUNCA en el repositorio.
-    """
-    contenido = os.environ.get("YT_COOKIES")
-    if not contenido:
-        return None
-    ruta = os.path.join(tempfile.gettempdir(), "cookies.txt")
-    try:
-        with open(ruta, "w", encoding="utf-8") as f:
-            f.write(contenido)
-        return ruta
-    except OSError:
-        return None
-
-
 def opciones_base() -> dict:
-    """Opciones comunes de yt-dlp, con los ajustes anti-bloqueo de YouTube."""
-    opciones = {
+    """Opciones comunes de yt-dlp para TikTok y Facebook."""
+    return {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "extractor_args": EXTRACTOR_ARGS,
     }
-    cookies = archivo_cookies()
-    if cookies:
-        opciones["cookiefile"] = cookies
-    return opciones
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +49,7 @@ PAGINA = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Descargar videos y audio</title>
+  <title>Descargar videos - TikTok y Facebook</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -122,12 +94,12 @@ PAGINA = """<!DOCTYPE html>
 <body>
   <div class="caja">
     <h1>&#11015;&#65039; Descargar</h1>
-    <p class="sub">TikTok, Facebook y YouTube. Sin anuncios.</p>
+    <p class="sub">TikTok y Facebook. Sin anuncios.</p>
     <div class="toggle">
       <button id="btnVideo" class="activo" type="button">&#127916; Video MP4</button>
       <button id="btnAudio" type="button">&#127925; Audio MP3</button>
     </div>
-    <input id="url" type="text" placeholder="Pega aqui el link..." autocomplete="off" />
+    <input id="url" type="text" placeholder="Pega aqui el link de TikTok o Facebook..." autocomplete="off" />
     <button id="btn">Descargar</button>
     <div id="estado"></div>
     <div id="resultado"></div>
@@ -153,6 +125,11 @@ PAGINA = """<!DOCTYPE html>
       const url = input.value.trim();
       resultado.innerHTML = ""; estado.className = "";
       if (!url) { estado.textContent = "Primero pega un link."; return; }
+      if (/youtube\\.com|youtu\\.be/i.test(url)) {
+        estado.className = "error";
+        estado.textContent = "\\u26A0\\uFE0F Para YouTube usa la app NewPipe en el celular (YouTube bloquea las webs).";
+        return;
+      }
       btn.disabled = true; estado.textContent = "Procesando... \\u23F3";
       try {
         const resp = await fetch("/api/download?url=" + encodeURIComponent(url));
