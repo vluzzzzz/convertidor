@@ -32,6 +32,21 @@ def ruta_ffmpeg():
         return None
 
 
+# YouTube bloquea las IP de datacenter (Vercel) con su cliente web normal.
+# Pedir los clientes de TV / celular suele esquivar ese bloqueo sin cookies.
+EXTRACTOR_ARGS = {"youtube": {"player_client": ["tv", "ios", "android", "web"]}}
+
+
+def opciones_base() -> dict:
+    """Opciones comunes de yt-dlp, con los ajustes anti-bloqueo de YouTube."""
+    return {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "extractor_args": EXTRACTOR_ARGS,
+    }
+
+
 # ---------------------------------------------------------------------------
 # La pagina (interfaz). Va embebida para que siempre se sirva.
 # ---------------------------------------------------------------------------
@@ -142,12 +157,8 @@ PAGINA = """<!DOCTYPE html>
 
 def extraer_info(url: str) -> dict:
     """Devuelve titulo y miniatura del link (sin descargar)."""
-    opciones = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "noplaylist": True,
-    }
+    opciones = opciones_base()
+    opciones["skip_download"] = True
     with yt_dlp.YoutubeDL(opciones) as ydl:
         info = ydl.extract_info(url, download=False)
     if info.get("_type") == "playlist" and info.get("entries"):
@@ -189,12 +200,8 @@ class handler(BaseHTTPRequestHandler):
         carpeta = tempfile.mkdtemp()
         plantilla = os.path.join(carpeta, "salida.%(ext)s")
 
-        opciones = {
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "outtmpl": plantilla,
-        }
+        opciones = opciones_base()
+        opciones["outtmpl"] = plantilla
         if es_mp3:
             ff = ruta_ffmpeg()
             if ff:
