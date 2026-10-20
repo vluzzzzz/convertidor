@@ -2,13 +2,15 @@
 Funcion serverless de Vercel (entrypoint unico).
 
 Con el runtime Python nuevo de Vercel, TODAS las rutas llegan a este handler.
-Por eso aqui hacemos dos cosas segun la peticion:
+Segun la peticion hacemos:
 
-  * Si viene el parametro ?url=...  -> extraemos el MP4 y devolvemos JSON.
-  * Si no                            -> servimos la pagina (index.html).
+  * Sin ?url=                     -> servimos la pagina (interfaz).
+  * ?url=...                      -> devolvemos info (titulo/miniatura) en JSON.
+  * ?dl=1&url=...                 -> proxy: bajamos el video MP4 y lo reenviamos.
+  * ?dl=1&fmt=mp3&url=...         -> proxy: extraemos el audio a MP3 y lo reenviamos.
 
-Usa yt-dlp para sacar la URL directa del MP4 (sin descargar el archivo en el
-servidor); el navegador del usuario descarga el video directo desde el CDN.
+Usa yt-dlp (y ffmpeg via imageio-ffmpeg para el MP3). Bajar en el servidor
+evita el 403 de las CDN de TikTok/Facebook y maneja la sesion de YouTube.
 """
 
 import json
@@ -21,16 +23,24 @@ from urllib.parse import urlparse, parse_qs, quote
 import yt_dlp
 
 
+def ruta_ffmpeg():
+    """Devuelve la ruta al binario ffmpeg (incluido via imageio-ffmpeg)."""
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ---------------------------------------------------------------------------
-# La pagina (interfaz). Va embebida para que siempre se sirva, sin depender de
-# como Vercel maneje los archivos estaticos con el entrypoint Python.
+# La pagina (interfaz). Va embebida para que siempre se sirva.
 # ---------------------------------------------------------------------------
 PAGINA = """<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Descargar videos - TikTok y Facebook</title>
+  <title>Descargar videos y audio</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -43,17 +53,23 @@ PAGINA = """<!DOCTYPE html>
       padding: 32px 28px; box-shadow: 0 10px 40px rgba(0,0,0,.4);
     }
     h1 { font-size: 24px; margin: 0 0 6px; text-align: center; }
-    p.sub { margin: 0 0 24px; text-align: center; color: #94a3b8; font-size: 14px; }
+    p.sub { margin: 0 0 22px; text-align: center; color: #94a3b8; font-size: 14px; }
+    .toggle { display: flex; gap: 8px; margin-bottom: 14px; }
+    .toggle button {
+      flex: 1; padding: 12px; font-size: 15px; font-weight: 600; border: 2px solid #334155;
+      border-radius: 10px; background: #0f172a; color: #94a3b8; cursor: pointer;
+    }
+    .toggle button.activo { border-color: #38bdf8; color: #e2e8f0; background: #0b2534; }
     input {
       width: 100%; padding: 14px 16px; font-size: 16px; border: 2px solid #334155;
       border-radius: 10px; background: #0f172a; color: #e2e8f0; margin-bottom: 14px;
     }
     input:focus { outline: none; border-color: #38bdf8; }
-    button {
+    #btn {
       width: 100%; padding: 14px; font-size: 17px; font-weight: 600; border: none;
       border-radius: 10px; background: #38bdf8; color: #0f172a; cursor: pointer;
     }
-    button:disabled { opacity: .6; cursor: not-allowed; }
+    #btn:disabled { opacity: .6; cursor: not-allowed; }
     #estado { margin-top: 18px; text-align: center; font-size: 15px; min-height: 22px; }
     .error { color: #f87171; }
     #resultado { margin-top: 20px; text-align: center; }
@@ -68,9 +84,13 @@ PAGINA = """<!DOCTYPE html>
 </head>
 <body>
   <div class="caja">
-    <h1>&#11015;&#65039; Descargar video</h1>
-    <p class="sub">Pega el link de TikTok o Facebook. Sin anuncios.</p>
-    <input id="url" type="text" placeholder="Pega aqui el link del video..." autocomplete="off" />
+    <h1>&#11015;&#65039; Descargar</h1>
+    <p class="sub">TikTok, Facebook y YouTube. Sin anuncios.</p>
+    <div class="toggle">
+      <button id="btnVideo" class="activo" type="button">&#127916; Video MP4</button>
+      <button id="btnAudio" type="button">&#127925; Audio MP3</button>
+    </div>
+    <input id="url" type="text" placeholder="Pega aqui el link..." autocomplete="off" />
     <button id="btn">Descargar</button>
     <div id="estado"></div>
     <div id="resultado"></div>
@@ -80,6 +100,17 @@ PAGINA = """<!DOCTYPE html>
     const btn = document.getElementById("btn");
     const estado = document.getElementById("estado");
     const resultado = document.getElementById("resultado");
+    const btnVideo = document.getElementById("btnVideo");
+    const btnAudio = document.getElementById("btnAudio");
+    let formato = "mp4";
+
+    function elegir(f) {
+      formato = f;
+      btnVideo.classList.toggle("activo", f === "mp4");
+      btnAudio.classList.toggle("activo", f === "mp3");
+    }
+    btnVideo.addEventListener("click", () => elegir("mp4"));
+    btnAudio.addEventListener("click", () => elegir("mp3"));
 
     async function procesar() {
       const url = input.value.trim();
@@ -91,11 +122,13 @@ PAGINA = """<!DOCTYPE html>
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || "No se pudo procesar.");
         estado.textContent = "\\u00A1Listo! \\u2705";
+        const etiqueta = formato === "mp3" ? "Descargar MP3" : "Descargar MP4";
+        const dl = "/api/download?dl=1&fmt=" + formato + "&url=" + encodeURIComponent(url);
         resultado.innerHTML =
           (data.miniatura ? '<img src="' + data.miniatura + '" alt="miniatura" />' : "") +
           '<div class="titulo">' + (data.titulo || "") + '</div>' +
-          '<a class="descargar" href="/api/download?dl=1&url=' + encodeURIComponent(url) + '">Descargar MP4</a>' +
-          '<div class="nota">La descarga pasa por el servidor para evitar el bloqueo de TikTok/Facebook.</div>';
+          '<a class="descargar" href="' + dl + '">' + etiqueta + '</a>' +
+          '<div class="nota">La descarga pasa por el servidor. Para MP3 puede tardar unos segundos mas.</div>';
       } catch (e) {
         estado.className = "error"; estado.textContent = "\\u26A0\\uFE0F " + e.message;
       } finally { btn.disabled = false; }
@@ -107,49 +140,29 @@ PAGINA = """<!DOCTYPE html>
 </html>"""
 
 
-def extraer_video(url: str) -> dict:
-    """Devuelve titulo, miniatura y la URL directa del MP4 para el link dado."""
+def extraer_info(url: str) -> dict:
+    """Devuelve titulo y miniatura del link (sin descargar)."""
     opciones = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "format": "best[ext=mp4]/best",
+        "noplaylist": True,
     }
     with yt_dlp.YoutubeDL(opciones) as ydl:
         info = ydl.extract_info(url, download=False)
-
     if info.get("_type") == "playlist" and info.get("entries"):
         info = info["entries"][0]
-
-    url_directa = info.get("url")
-    headers = info.get("http_headers") or {}
-    if not url_directa:
-        candidatos = [
-            f for f in info.get("formats", [])
-            if f.get("url")
-            and f.get("vcodec") not in (None, "none")
-            and f.get("acodec") not in (None, "none")
-        ]
-        if candidatos:
-            url_directa = candidatos[-1]["url"]
-            headers = candidatos[-1].get("http_headers") or headers
-
-    if not url_directa:
-        raise ValueError("No se pudo encontrar el video en ese link.")
-
     return {
         "titulo": info.get("title") or "video",
         "miniatura": info.get("thumbnail"),
-        "url_directa": url_directa,
-        "headers": headers,
     }
 
 
-def nombre_archivo(titulo: str) -> str:
-    """Convierte un titulo en un nombre de archivo .mp4 seguro."""
+def nombre_archivo(titulo: str, extension: str) -> str:
+    """Convierte un titulo en un nombre de archivo seguro con la extension dada."""
     limpio = re.sub(r"[^\w\s-]", "", titulo, flags=re.UNICODE).strip()
     limpio = re.sub(r"\s+", "_", limpio)
-    return (limpio[:60] or "video") + ".mp4"
+    return (limpio[:60] or "archivo") + "." + extension
 
 
 class handler(BaseHTTPRequestHandler):
@@ -166,32 +179,54 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(PAGINA.encode("utf-8"))
 
-    def _proxy_descarga(self, url: str):
-        """yt-dlp baja el video a /tmp (maneja cookies/sesion y evita el 403 de
-        la CDN) y luego lo reenviamos al navegador como un archivo .mp4."""
+    def _proxy_descarga(self, url: str, fmt: str):
+        """yt-dlp baja el contenido a /tmp y lo reenviamos al navegador.
+
+        fmt == 'mp3' -> extrae solo el audio y lo convierte a MP3 (usa ffmpeg).
+        fmt == 'mp4' -> baja el video completo.
+        """
+        es_mp3 = fmt == "mp3"
         carpeta = tempfile.mkdtemp()
-        plantilla = os.path.join(carpeta, "video.%(ext)s")
+        plantilla = os.path.join(carpeta, "salida.%(ext)s")
+
         opciones = {
             "quiet": True,
             "no_warnings": True,
-            "format": "best[ext=mp4]/best",
-            "outtmpl": plantilla,
             "noplaylist": True,
+            "outtmpl": plantilla,
         }
+        if es_mp3:
+            ff = ruta_ffmpeg()
+            if ff:
+                opciones["ffmpeg_location"] = ff
+            opciones["format"] = "bestaudio/best"
+            opciones["postprocessors"] = [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }]
+            extension, content_type = "mp3", "audio/mpeg"
+        else:
+            opciones["format"] = "best[ext=mp4]/best"
+            extension, content_type = "mp4", "video/mp4"
+
         try:
             with yt_dlp.YoutubeDL(opciones) as ydl:
                 info = ydl.extract_info(url, download=True)
             if info.get("_type") == "playlist" and info.get("entries"):
                 info = info["entries"][0]
 
-            archivos = [f for f in os.listdir(carpeta) if f.startswith("video.")]
-            if not archivos:
-                raise RuntimeError("No se genero el archivo de video.")
-            ruta = os.path.join(carpeta, archivos[0])
+            # Tras el postproceso, buscamos el archivo con la extension esperada.
+            candidatos = [f for f in os.listdir(carpeta) if f.endswith("." + extension)]
+            if not candidatos:
+                candidatos = [f for f in os.listdir(carpeta) if f.startswith("salida.")]
+            if not candidatos:
+                raise RuntimeError("No se genero el archivo.")
+            ruta = os.path.join(carpeta, candidatos[0])
 
             self.send_response(200)
-            self.send_header("Content-Type", "video/mp4")
-            nombre = nombre_archivo(info.get("title") or "video")
+            self.send_header("Content-Type", content_type)
+            nombre = nombre_archivo(info.get("title") or "archivo", extension)
             self.send_header(
                 "Content-Disposition",
                 "attachment; filename*=UTF-8''" + quote(nombre),
@@ -205,7 +240,6 @@ class handler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(trozo)
         finally:
-            # Limpieza del temporal.
             try:
                 for f in os.listdir(carpeta):
                     os.remove(os.path.join(carpeta, f))
@@ -217,29 +251,30 @@ class handler(BaseHTTPRequestHandler):
         params = parse_qs(urlparse(self.path).query)
         url = (params.get("url") or [""])[0].strip()
         descargar = (params.get("dl") or [""])[0] == "1"
+        fmt = (params.get("fmt") or ["mp4"])[0]
 
         # Sin ?url= -> mostramos la pagina.
         if not url:
             self._enviar_pagina()
             return
 
-        # Con ?dl=1 -> proxy: bajamos el video y se lo pasamos al navegador.
+        # Con ?dl=1 -> proxy: bajamos y reenviamos el archivo.
         if descargar:
             try:
-                self._proxy_descarga(url)
+                self._proxy_descarga(url, fmt)
             except Exception:  # noqa: BLE001
-                self._enviar_json(500, {"error": "No se pudo descargar el video."})
+                self._enviar_json(500, {"error": "No se pudo descargar."})
             return
 
         # Con ?url= (sin dl) -> devolvemos la info en JSON.
         try:
-            self._enviar_json(200, extraer_video(url))
+            self._enviar_json(200, extraer_info(url))
         except Exception as e:  # noqa: BLE001
             mensaje = str(e)
-            if "Private" in mensaje or "login" in mensaje.lower():
-                mensaje = "Ese video es privado o necesita iniciar sesion."
+            if "Private" in mensaje or "login" in mensaje.lower() or "bot" in mensaje.lower():
+                mensaje = "Ese contenido es privado, o la plataforma bloqueo la peticion."
             elif "Unsupported URL" in mensaje or "not a valid URL" in mensaje:
                 mensaje = "Ese link no es valido o no esta soportado."
             else:
-                mensaje = "No se pudo procesar el video. Revisa el link e intenta de nuevo."
+                mensaje = "No se pudo procesar. Revisa el link e intenta de nuevo."
             self._enviar_json(500, {"error": mensaje})
